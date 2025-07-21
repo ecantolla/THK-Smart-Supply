@@ -1,3 +1,4 @@
+// c:\Users\ecant\OneDrive\Documentos\Smart\SmartSupplyGem-mainjul18\types.ts
 export interface TransactionInputData {
   rowIndex: number
   ID: string
@@ -37,6 +38,11 @@ export interface ProductCalculatedData extends ProductInputData {
 
 export interface ConfigRule {
   ID: string
+  Stock_Fijo?: number
+  Semanas_Cobertura_Stock?: number
+}
+
+export interface Rule {
   Stock_Fijo?: number
   Semanas_Cobertura_Stock?: number
 }

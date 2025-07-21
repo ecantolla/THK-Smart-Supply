@@ -1,7 +1,7 @@
+// c:\Users\ecant\OneDrive\Documentos\Smart\SmartSupplyGem-mainjul18\services\dataProcessor.ts
 import * as XLSX from "xlsx"
 import type {
   Transaction,
-  TransactionInputData,
   Rule,
   ConfigRule,
   ProductInputData,
@@ -11,8 +11,6 @@ import type {
 import {
   TRANSACTION_REQUIRED_HEADERS,
   CONFIG_REQUIRED_HEADERS,
-  TRANSACTION_NUMERIC_COLUMNS,
-  CALCULATION_NUMERIC_COLUMNS,
 } from "../constants"
 
 // --- Funciones de Ayuda (Helpers) ---
@@ -365,6 +363,7 @@ export const exportResultsToExcel = (
     return {
       ID: r.ID,
       Nombre: r.Nombre,
+      "Venta Mes Actual": r.Venta_Total_Mes_Actual,
       ...sales,
       "Venta Prom. Semanal": r.Venta_Promedio_Semanal,
       "Semanas Cobertura": r.Semanas_Cobertura_Stock,
@@ -375,7 +374,21 @@ export const exportResultsToExcel = (
     }
   })
 
-  const resultsWs = XLSX.utils.json_to_sheet(dataToExport)
+  // Define el orden explícito de las columnas para evitar que la librería las ordene alfabéticamente.
+  const explicitHeaders = [
+    "ID",
+    "Nombre",
+    "Venta Mes Actual",
+    ...weekHeaders, // Las semanas ya vienen ordenadas de la más nueva a la más antigua
+    "Venta Prom. Semanal",
+    "Semanas Cobertura",
+    "Stock Actual",
+    "Stock Ideal",
+    "Unidades a Abastecer",
+    "Estado",
+  ]
+
+  const resultsWs = XLSX.utils.json_to_sheet(dataToExport, { header: explicitHeaders })
   XLSX.utils.book_append_sheet(wb, resultsWs, "Resultados")
 
   XLSX.writeFile(wb, `SmartSupply_Resultados_${new Date().toISOString().slice(0, 10)}.xlsx`)
