@@ -182,7 +182,9 @@ const aggregateTransactionsToProducts = (
 
     const firstSaleDate = new Date(Math.min(...productTransactions.map((t) => t.fechaDate.getTime())))
     const productAgeInWeeks = Math.ceil((latestDate.getTime() - firstSaleDate.getTime() + 1) / (7 * 24 * 60 * 60 * 1000))
-    const divisorForAverage = Math.max(1, Math.min(productAgeInWeeks, divisorPeriodos))
+    // CORRECCIÓN FINAL: El divisor para el promedio debe ser siempre el que el usuario especifica,
+    // sin ser modificado por la antigüedad del producto. La lógica de cálculo ya se encarga
+    // de tomar las semanas correctas (incluyendo ceros si el producto es nuevo).
 
     aggregatedProducts.push({
       ID: String(firstTransaction.ID),
@@ -192,7 +194,7 @@ const aggregateTransactionsToProducts = (
       Stock_Actual: firstTransaction.Stock_Actual,
       salesPeriods: salesPeriods,
       rowIndex: firstTransaction.rowIndex,
-      Divisor_Periodos: divisorForAverage,
+      Divisor_Periodos: divisorPeriodos,
       productAgeInWeeks,
     })
   })
@@ -212,7 +214,6 @@ export const calculateProductMetrics = (
       semanasCobertura = rule.Semanas_Cobertura_Stock
     }
 
-    // LÓGICA CORREGIDA:
     // El array p.salesPeriods está ordenado de la semana más reciente a la más antigua.
     // Para un promedio correcto, solo debemos sumar las ventas del número de períodos que indica el divisor.
     const salesForAverage = p.salesPeriods.slice(0, p.Divisor_Periodos)
