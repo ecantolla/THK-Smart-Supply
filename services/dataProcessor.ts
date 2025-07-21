@@ -226,7 +226,7 @@ export const calculateProductMetrics = (
     return {
       ...p,
       Semanas_Cobertura_Stock: semanasCobertura,
-      Venta_Promedio_Semanal: parseFloat(ventaPromedioSemanal.toFixed(2)),
+      Venta_Promedio_Semanal: Math.round(ventaPromedioSemanal),
       Stock_Ideal: Math.round(stockIdeal),
       Unidades_A_Abastecer: Math.round(unidadesAAbastecer),
       status,
@@ -361,7 +361,7 @@ export const exportResultsToExcel = (
     "ID",
     "Nombre",
     "Venta Mes Actual",
-    ...weekHeaders, // Las semanas ya vienen ordenadas de la más nueva a la más antigua
+    ...[...weekHeaders].reverse(),
     "Venta Prom. Semanal",
     "Semanas Cobertura",
     "Stock Actual",
@@ -375,7 +375,7 @@ export const exportResultsToExcel = (
     r.ID,
     r.Nombre,
     r.Venta_Total_Mes_Actual,
-    ...r.salesPeriods, // El arreglo de ventas ya está en el orden correcto
+    ...[...r.salesPeriods].reverse(),
     r.Venta_Promedio_Semanal,
     r.Semanas_Cobertura_Stock,
     r.Stock_Actual,
