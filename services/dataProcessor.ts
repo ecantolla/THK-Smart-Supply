@@ -341,7 +341,7 @@ export const exportResultsToExcel = (
 ) => {
   const wb = XLSX.utils.book_new()
 
-  // Hoja de Resumen
+  // --- Hoja de Resumen ---
   const summaryData = [
     ["Parámetro", "Valor"],
     ["Archivo de Ventas", fileName],
@@ -354,28 +354,10 @@ export const exportResultsToExcel = (
   const summaryWs = XLSX.utils.aoa_to_sheet(summaryData)
   XLSX.utils.book_append_sheet(wb, summaryWs, "Resumen")
 
-  // Hoja de Resultados
-  const dataToExport = results.map((r) => {
-    const sales: { [key: string]: number } = {}
-    weekHeaders.forEach((h, i) => {
-      sales[h] = r.salesPeriods[i]
-    })
-    return {
-      ID: r.ID,
-      Nombre: r.Nombre,
-      "Venta Mes Actual": r.Venta_Total_Mes_Actual,
-      ...sales,
-      "Venta Prom. Semanal": r.Venta_Promedio_Semanal,
-      "Semanas Cobertura": r.Semanas_Cobertura_Stock,
-      "Stock Actual": r.Stock_Actual,
-      "Stock Ideal": r.Stock_Ideal,
-      "Unidades a Abastecer": r.Unidades_A_Abastecer,
-      Estado: r.status,
-    }
-  })
+  // --- Hoja de Resultados (Método Robusto) ---
 
-  // Define el orden explícito de las columnas para evitar que la librería las ordene alfabéticamente.
-  const explicitHeaders = [
+  // 1. Definir el encabezado en el orden exacto que deseamos.
+  const headers = [
     "ID",
     "Nombre",
     "Venta Mes Actual",
@@ -388,8 +370,24 @@ export const exportResultsToExcel = (
     "Estado",
   ]
 
-  const resultsWs = XLSX.utils.json_to_sheet(dataToExport, { header: explicitHeaders })
+  // 2. Convertir los resultados en un arreglo de arreglos, respetando el orden de los encabezados.
+  const dataToExport = results.map((r) => [
+    r.ID,
+    r.Nombre,
+    r.Venta_Total_Mes_Actual,
+    ...r.salesPeriods, // El arreglo de ventas ya está en el orden correcto
+    r.Venta_Promedio_Semanal,
+    r.Semanas_Cobertura_Stock,
+    r.Stock_Actual,
+    r.Stock_Ideal,
+    r.Unidades_A_Abastecer,
+    r.status,
+  ])
+
+  // 3. Crear la hoja a partir de un arreglo de arreglos, comenzando con los encabezados.
+  const resultsWs = XLSX.utils.aoa_to_sheet([headers, ...dataToExport])
   XLSX.utils.book_append_sheet(wb, resultsWs, "Resultados")
 
+  // 4. Escribir el archivo final.
   XLSX.writeFile(wb, `SmartSupply_Resultados_${new Date().toISOString().slice(0, 10)}.xlsx`)
 }
