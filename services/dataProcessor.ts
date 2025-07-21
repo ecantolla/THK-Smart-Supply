@@ -212,7 +212,13 @@ export const calculateProductMetrics = (
       semanasCobertura = rule.Semanas_Cobertura_Stock
     }
 
-    const ventaPromedioSemanal = p.salesPeriods.reduce((a, b) => a + b, 0) / p.Divisor_Periodos
+    // LÓGICA CORREGIDA:
+    // El array p.salesPeriods está ordenado de la semana más reciente a la más antigua.
+    // Para un promedio correcto, solo debemos sumar las ventas del número de períodos que indica el divisor.
+    const salesForAverage = p.salesPeriods.slice(0, p.Divisor_Periodos)
+    const sumOfSalesForAverage = salesForAverage.reduce((a, b) => a + b, 0)
+    const ventaPromedioSemanal = sumOfSalesForAverage / p.Divisor_Periodos
+
     let stockIdeal = ventaPromedioSemanal * semanasCobertura
     let status: "OK" | "Fijo" = "OK"
 
