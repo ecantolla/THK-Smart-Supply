@@ -1,249 +1,130 @@
 import * as XLSX from "xlsx"
 import type {
   Transaction,
+  TransactionInputData,
+  Rule,
+  ConfigRule,
   ProductInputData,
   ProductCalculatedData,
-  TransactionInputData,
-  ConfigRule,
+  ProcessingInfo,
 } from "../types"
 import {
   TRANSACTION_REQUIRED_HEADERS,
+  CONFIG_REQUIRED_HEADERS,
   TRANSACTION_NUMERIC_COLUMNS,
   CALCULATION_NUMERIC_COLUMNS,
-  CONFIG_REQUIRED_HEADERS,
-  CONFIG_OPTIONAL_HEADERS,
 } from "../constants"
-import { getISOWeekAndYear, getISOWeekRange, getISOWeekStartDate, getISOWeekEndDate } from "../utils/dateUtils"
 
-// --- UTILITY FUNCTIONS ---
+// --- Funciones de Ayuda (Helpers) ---
 
 const normalizeId = (id: any): string => {
   if (id === null || id === undefined) return ""
-  return String(id)
-    .trim()
-    .replace(/,/g, "")
-    .replace(/\.0+$/, "")
-    .toUpperCase()
+  return String(id).trim().replace(/,/g, "").replace(/\.0+$/, "")
 }
 
 const parseDate = (dateValue: any): Date | null => {
-  if (dateValue instanceof Date && !isNaN(dateValue.getTime())) {
-    return new Date(Date.UTC(dateValue.getFullYear(), dateValue.getMonth(), dateValue.getDate()))
-  }
+  if (!dateValue) return null
+  if (dateValue instanceof Date) return dateValue
 
-  if (typeof dateValue === "number" && dateValue > 0) {
-    const utcMilliseconds = (dateValue - 25569) * 86400 * 1000
-    const parsedDate = new Date(utcMilliseconds)
-    if (parsedDate.getUTCFullYear() > 1900 && parsedDate.getUTCFullYear() < 3000) {
-      return parsedDate
-    }
+  if (typeof dateValue === "number") {
+    const excelEpoch = new Date(1899, 11, 30)
+    const date = new Date(excelEpoch.getTime() + dateValue * 24 * 60 * 60 * 1000)
+    date.setTime(date.getTime() + date.getTimezoneOffset() * 60 * 1000)
+    return date
   }
 
   if (typeof dateValue === "string") {
-    const parts = dateValue.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/)
-    if (!parts) return null
-    const d = parseInt(parts[1], 10)
-    const m = parseInt(parts[2], 10)
-    const y = parseInt(parts[3], 10)
-    if (y < 1970 || y > 3000 || m === 0 || m > 12 || d === 0 || d > 31) return null
-    const date = new Date(Date.UTC(y, m - 1, d))
-    if (date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d) {
-      return date
+    const parts = dateValue.match(/(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})/)
+    if (parts) {
+      const day = parseInt(parts[1], 10)
+      const month = parseInt(parts[2], 10) - 1
+      let year = parseInt(parts[3], 10)
+      if (year < 100) year += 2000
+      return new Date(Date.UTC(year, month, day))
     }
   }
-
   return null
 }
 
-const readFileData = async (file: File): Promise<any[][]> => {
-  if (file.name.toLowerCase().endsWith(".csv")) {
-    const text = await file.text()
-    const result = XLSX.read(text, { type: "string" })
-    const worksheet = result.Sheets[result.SheetNames[0]]
-    return XLSX.utils.sheet_to_json<any>(worksheet, { header: 1, defval: null })
+const getISOWeekAndYear = (date: Date): { isoWeek: number; isoYear: number } => {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+  const dayNum = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum)
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  const isoWeek = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
+  return { isoWeek, isoYear: d.getUTCFullYear() }
+}
+
+const getISOWeekStartDate = (isoYear: number, isoWeek: number): Date => {
+  const simple = new Date(Date.UTC(isoYear, 0, 1 + (isoWeek - 1) * 7))
+  const dayOfWeek = simple.getUTCDay()
+  const isoWeekStart = simple
+  if (dayOfWeek <= 4) {
+    isoWeekStart.setUTCDate(simple.getUTCDate() - simple.getUTCDay() + 1)
   } else {
-    const arrayBuffer = await file.arrayBuffer()
-    const workbook = XLSX.read(arrayBuffer, { type: "buffer" })
-    const worksheet = workbook.Sheets[workbook.SheetNames[0]]
-    if (!worksheet) throw new Error("El archivo Excel no contiene hojas.")
-    return XLSX.utils.sheet_to_json<any>(worksheet, { header: 1, defval: null })
+    isoWeekStart.setUTCDate(simple.getUTCDate() + 8 - simple.getUTCDay())
   }
+  return isoWeekStart
 }
 
-// --- FILE PROCESSING ---
+const getISOWeekEndDate = (isoYear: number, isoWeek: number): Date => {
+  const startDate = getISOWeekStartDate(isoYear, isoWeek)
+  const endDate = new Date(startDate)
+  endDate.setUTCDate(startDate.getUTCDate() + 6)
+  return endDate
+}
 
-const validateAndMapHeaders = (
-  uploadedHeaders: any[],
-  requiredHeaders: string[],
-): { headerMap: Map<string, number>; error?: string; optionalHeaderMap?: Map<string, number> } => {
-  const headerMap = new Map<string, number>()
-  const optionalHeaderMap = new Map<string, number>()
-  const lowercasedUploadedHeaders = uploadedHeaders.map((h) => (h ? String(h).trim().toLowerCase() : ""))
+const getISOWeekRange = (
+  startYear: number,
+  startWeek: number,
+  numWeeks: number,
+): { isoWeek: number; isoYear: number }[] => {
+  const weeks = []
+  let currentYear = startYear
+  let currentWeek = startWeek
 
-  const missingHeaders = requiredHeaders.filter((reqH) => {
-    const index = lowercasedUploadedHeaders.indexOf(reqH.toLowerCase())
-    if (index !== -1) {
-      headerMap.set(reqH, index)
-      return false
+  for (let i = 0; i < numWeeks; i++) {
+    weeks.push({ isoWeek: currentWeek, isoYear: currentYear })
+    currentWeek--
+    if (currentWeek < 1) {
+      currentYear--
+      const { isoWeek: lastWeekPrevYear } = getISOWeekAndYear(new Date(Date.UTC(currentYear, 11, 31)))
+      currentWeek = lastWeekPrevYear
     }
-    return true
-  })
+  }
+  return weeks
+}
 
+// --- Lógica de Lectura y Agregación ---
+
+const readFile = (file: File): Promise<any[]> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const data = e.target?.result
+        const workbook = XLSX.read(data, { type: "array" })
+        const sheetName = workbook.SheetNames[0]
+        const worksheet = workbook.Sheets[sheetName]
+        const json = XLSX.utils.sheet_to_json(worksheet, { raw: true })
+        resolve(json)
+      } catch (err) {
+        reject(new Error("Error al leer o procesar el archivo. Asegúrate de que sea un formato válido (CSV/Excel)."))
+      }
+    }
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo."))
+    reader.readAsArrayBuffer(file)
+  })
+}
+
+const validateHeaders = (data: any[], requiredHeaders: string[]): string | null => {
+  if (data.length === 0) return "El archivo está vacío o no tiene datos."
+  const headers = Object.keys(data[0])
+  const missingHeaders = requiredHeaders.filter((h) => !headers.includes(h))
   if (missingHeaders.length > 0) {
-    return { headerMap, error: `Encabezados requeridos no encontrados: ${missingHeaders.join(", ")}.` }
+    return `Faltan las siguientes columnas obligatorias: ${missingHeaders.join(", ")}`
   }
-
-  // Map optional headers for config file
-  CONFIG_OPTIONAL_HEADERS.forEach((optH) => {
-    const index = lowercasedUploadedHeaders.indexOf(optH.toLowerCase())
-    if (index !== -1) {
-      optionalHeaderMap.set(optH, index)
-    }
-  })
-
-  return { headerMap, optionalHeaderMap }
-}
-
-const parseTransactionsFromData = (
-  data: any[][],
-  headerMap: Map<string, number>,
-): { transactions: Transaction[]; error?: string } => {
-  const transactions: Transaction[] = []
-  const errors: string[] = []
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i]
-    if (!row || row.every((cell) => cell === null || cell === undefined || cell === "")) continue
-
-    let rowHasError = false
-    const transactionInput: any = { rowIndex: i + 1 }
-
-    const fechaValue = row[headerMap.get("Fecha")!]
-    const fechaDate = parseDate(fechaValue)
-    if (!fechaDate) {
-      errors.push(
-        `Fila ${i + 1}: Formato de fecha inválido para "${
-          fechaValue || ""
-        }". Se esperaba DD/MM/AAAA o un número de serie de Excel.`,
-      )
-      rowHasError = true
-    }
-
-    TRANSACTION_REQUIRED_HEADERS.forEach((header) => {
-      if (header === "Fecha") return // Already handled
-      const key = header as keyof TransactionInputData
-      const colIndex = headerMap.get(header)!
-      const value = row[colIndex]
-
-      if (TRANSACTION_NUMERIC_COLUMNS.includes(key as any)) {
-        const numValue = parseFloat(String(value ?? ""))
-        if (value === null || value === undefined || String(value).trim() === "" || isNaN(numValue)) {
-          errors.push(`Fila ${i + 1}, Columna "${header}": Valor "${value}" no es un número.`)
-          rowHasError = true
-        } else {
-          transactionInput[key] = numValue
-        }
-      } else {
-        // For ID and Nombre
-        transactionInput[key] = value
-      }
-    })
-
-    if (transactionInput.ID === null || transactionInput.ID === undefined || String(transactionInput.ID).trim() === "") {
-      errors.push(`Fila ${i + 1}: "ID" no puede estar vacío.`)
-      rowHasError = true
-    }
-
-    if (!rowHasError) {
-      const { isoWeek, isoYear } = getISOWeekAndYear(fechaDate!)
-      transactions.push({ ...transactionInput, fechaDate: fechaDate!, isoWeek, isoYear })
-    }
-  }
-  const errorString =
-    errors.length > 0 ? `Problemas al analizar datos:\n- ${errors.slice(0, 10).join("\n- ")}` : undefined
-  return { transactions, error: errorString }
-}
-
-const parseConfigRules = (
-  data: any[][],
-  headerMap: Map<string, number>,
-  optionalHeaderMap: Map<string, number>,
-): { rules: Map<string, ConfigRule>; warnings: string[] } => {
-  const rules = new Map<string, ConfigRule>()
-  const warnings: string[] = []
-  const idCol = headerMap.get("ID")!
-  const stockFijoCol = optionalHeaderMap.get("Stock_Fijo")
-  const semanasCoberturaCol = optionalHeaderMap.get("Semanas_Cobertura_Stock")
-
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i]
-    if (!row || row.every((cell) => cell === null || cell === undefined || cell === "")) continue
-
-    const id = normalizeId(row[idCol])
-    if (!id) {
-      warnings.push(`Fila ${i + 1} del archivo de reglas: El ID está vacío y será ignorado.`)
-      continue
-    }
-
-    const rule: ConfigRule = { ID: id }
-
-    if (stockFijoCol !== undefined) {
-      const stockFijoValue = row[stockFijoCol]
-      if (stockFijoValue !== null && stockFijoValue !== undefined && String(stockFijoValue).trim() !== "") {
-        const numValue = parseFloat(String(stockFijoValue))
-        if (!isNaN(numValue) && isFinite(numValue)) {
-          rule.Stock_Fijo = numValue
-        } else {
-          warnings.push(`Fila ${i + 1} (ID ${id}): Valor de Stock_Fijo "${stockFijoValue}" no es un número válido y será ignorado.`)
-        }
-      }
-    }
-
-    if (semanasCoberturaCol !== undefined) {
-      const semanasCoberturaValue = row[semanasCoberturaCol]
-      if (
-        semanasCoberturaValue !== null &&
-        semanasCoberturaValue !== undefined &&
-        String(semanasCoberturaValue).trim() !== ""
-      ) {
-        const numValue = parseFloat(String(semanasCoberturaValue))
-        if (!isNaN(numValue) && isFinite(numValue)) {
-          rule.Semanas_Cobertura_Stock = numValue
-        } else {
-          warnings.push(
-            `Fila ${i + 1} (ID ${id}): Valor de Semanas_Cobertura_Stock "${semanasCoberturaValue}" no es un número válido y será ignorado.`,
-          )
-        }
-      }
-    }
-
-    if (rules.has(id)) {
-      warnings.push(`Fila ${i + 1}: ID duplicado "${id}" en el archivo de reglas. Se usará la última regla encontrada.`)
-    }
-    rules.set(id, rule)
-  }
-  return { rules, warnings }
-}
-
-// --- AGGREGATION AND CALCULATION ---
-
-const applyConfigRules = (products: ProductInputData[], rules: Map<string, ConfigRule>): ProductInputData[] => {
-  return products.map((product) => {
-    const normalizedId = normalizeId(product.ID)
-    const rule = rules.get(normalizedId)
-    if (!rule) return product
-
-    const updatedProduct = { ...product }
-
-    if (typeof rule.Semanas_Cobertura_Stock === "number") {
-      updatedProduct.Semanas_Cobertura_Stock = rule.Semanas_Cobertura_Stock
-    }
-
-    if (typeof rule.Stock_Fijo === "number") {
-      updatedProduct.stockFijoOverride = rule.Stock_Fijo
-    }
-
-    return updatedProduct
-  })
+  return null
 }
 
 const aggregateTransactionsToProducts = (
@@ -253,10 +134,13 @@ const aggregateTransactionsToProducts = (
 ): { data: ProductInputData[]; weekHeaders: string[]; error?: string } => {
   if (transactions.length === 0) return { data: [], weekHeaders: [] }
 
-  const latestDate = new Date(Math.max(...transactions.map((t) => t.fechaDate.getTime())))
+  const latestDateMs = Math.max(...transactions.map((t) => t.fechaDate.getTime()))
+  const latestDate = new Date(latestDateMs)
+  const safeLatestDate = new Date(latestDate.getTime())
+  safeLatestDate.setUTCHours(12, 0, 0, 0)
   const currentMonthStart = new Date(Date.UTC(latestDate.getUTCFullYear(), latestDate.getUTCMonth(), 1))
 
-  const { isoWeek: currentISOWeek, isoYear: currentISOYear } = getISOWeekAndYear(latestDate)
+  const { isoWeek: currentISOWeek, isoYear: currentISOYear } = getISOWeekAndYear(safeLatestDate)
   let p1Week = currentISOWeek - 1,
     p1Year = currentISOYear
   if (p1Week < 1) {
@@ -287,7 +171,7 @@ const aggregateTransactionsToProducts = (
     const firstTransaction = productTransactions[0]
     const salesPeriods = Array(numPeriods).fill(0)
     let ventaTotalMesActual = 0
-    
+
     productTransactions.forEach((t) => {
       for (let i = 0; i < periodRanges.length; i++) {
         if (t.fechaDate >= periodRanges[i].start && t.fechaDate <= periodRanges[i].end) {
@@ -303,7 +187,7 @@ const aggregateTransactionsToProducts = (
     const divisorForAverage = Math.max(1, Math.min(productAgeInWeeks, divisorPeriodos))
 
     aggregatedProducts.push({
-      ID: String(firstTransaction.ID), // Ensure ID is a string for display
+      ID: String(firstTransaction.ID),
       Nombre: String(firstTransaction.Nombre ?? ""),
       Venta_Total_Mes_Actual: ventaTotalMesActual,
       Semanas_Cobertura_Stock: firstTransaction.Semanas_Cobertura_Stock,
@@ -317,64 +201,42 @@ const aggregateTransactionsToProducts = (
   return { data: aggregatedProducts, weekHeaders, error: undefined }
 }
 
-const calculateReplenishment = (products: ProductInputData[]): ProductCalculatedData[] => {
-  return products.map((product) => {
-    const result: ProductCalculatedData = {
-      ...product,
-      Venta_Promedio_Semanal: 0,
-      Stock_Ideal: 0,
-      Unidades_A_Abastecer: 0,
-      status: "OK", // Default status
-    }
-    
-    // Always calculate weekly average for informational purposes
-    try {
-        const divisor = product.Divisor_Periodos
-        if (divisor > 0) {
-            // salesPeriods is newest to oldest, so we take the first 'divisor' elements
-            const salesToAverage = product.salesPeriods.slice(0, divisor)
-            const sumOfSales = salesToAverage.reduce((acc, curr) => acc + curr, 0)
-            result.Venta_Promedio_Semanal = Math.round(sumOfSales / divisor)
-        }
-    } catch {
-        result.Venta_Promedio_Semanal = 0; // Keep it at 0 on error
+// --- Lógica de Cálculo ---
+
+export const calculateProductMetrics = (
+  products: ProductInputData[],
+  rules: Map<string, Rule>,
+): ProductCalculatedData[] => {
+  return products.map((p) => {
+    const rule = rules.get(normalizeId(p.ID))
+    let semanasCobertura = p.Semanas_Cobertura_Stock
+    if (rule?.Semanas_Cobertura_Stock !== undefined && rule.Semanas_Cobertura_Stock > 0) {
+      semanasCobertura = rule.Semanas_Cobertura_Stock
     }
 
+    const ventaPromedioSemanal = p.salesPeriods.reduce((a, b) => a + b, 0) / p.Divisor_Periodos
+    let stockIdeal = ventaPromedioSemanal * semanasCobertura
+    let status: "OK" | "Fijo" = "OK"
 
-    try {
-      // Set status to 'Fijo' if there's a valid stock override
-      if (typeof product.stockFijoOverride === "number" && isFinite(product.stockFijoOverride)) {
-        result.status = "Fijo"
-        result.Stock_Ideal = product.stockFijoOverride
-      } else {
-        // --- Standard Dynamic Calculation ---
-        CALCULATION_NUMERIC_COLUMNS.forEach((key) => {
-          const value = (product as any)[key]
-          if (typeof value !== "number" || !isFinite(value)) {
-            throw new Error(`Dato base inválido para ${key}: "${value}"`)
-          }
-        })
-        result.Stock_Ideal = Math.round(result.Venta_Promedio_Semanal * product.Semanas_Cobertura_Stock)
-      }
-      
-      const stockActual = product.Stock_Actual
-       if (typeof stockActual !== "number" || !isFinite(stockActual)) {
-        throw new Error(`Stock_Actual inválido: "${stockActual}"`)
-      }
-
-      result.Unidades_A_Abastecer = Math.round(Math.max(0, result.Stock_Ideal - stockActual))
-    } catch (e) {
-      const error = e instanceof Error ? e.message : "Error de cálculo desconocido"
-      result.error = `Error para ID ${product.ID || `en fila ${product.rowIndex}`}: ${error}`
-      result.Stock_Ideal = 0
-      result.Unidades_A_Abastecer = 0
+    if (rule?.Stock_Fijo !== undefined) {
+      stockIdeal = rule.Stock_Fijo
+      status = "Fijo"
     }
 
-    return result
+    const unidadesAAbastecer = Math.max(0, stockIdeal - p.Stock_Actual)
+
+    return {
+      ...p,
+      Semanas_Cobertura_Stock: semanasCobertura,
+      Venta_Promedio_Semanal: parseFloat(ventaPromedioSemanal.toFixed(2)),
+      Stock_Ideal: Math.round(stockIdeal),
+      Unidades_A_Abastecer: Math.round(unidadesAAbastecer),
+      status,
+    }
   })
 }
 
-// --- MAIN EXPORTED FUNCTIONS ---
+// --- Función Principal de Orquestación ---
 
 export const processAndCalculate = async (
   salesFile: File,
@@ -386,197 +248,135 @@ export const processAndCalculate = async (
   weekHeaders: string[]
   error?: string
   warnings?: string[]
-  processingInfo?: { totalTransactions: number; uniqueProducts: number }
+  processingInfo?: ProcessingInfo
 }> => {
+  const warnings: string[] = []
   try {
-    const salesData = await readFileData(salesFile)
-    if (salesData.length < 2)
-      return { results: [], weekHeaders: [], error: "El archivo de ventas debe tener encabezado y datos." }
-
-    const { headerMap, error: headerError } = validateAndMapHeaders(salesData[0], TRANSACTION_REQUIRED_HEADERS)
+    const salesData = await readFile(salesFile)
+    let headerError = validateHeaders(salesData, TRANSACTION_REQUIRED_HEADERS)
     if (headerError) return { results: [], weekHeaders: [], error: headerError }
 
-    const { transactions, error: parseError } = parseTransactionsFromData(salesData, headerMap)
-    if (transactions.length === 0)
-      return { results: [], weekHeaders: [], error: parseError || "No se encontraron transacciones válidas." }
-    if(parseError) return { results: [], weekHeaders: [], error: parseError }
+    const transactions: Transaction[] = []
+    salesData.forEach((row, index) => {
+      const fecha = parseDate(row.Fecha)
+      if (!fecha) {
+        warnings.push(`Fila ${index + 2}: Fecha inválida o vacía, esta fila será ignorada.`)
+        return
+      }
+      const transaction: Transaction = {
+        rowIndex: index + 2,
+        ID: String(row.ID ?? ""),
+        Nombre: String(row.Nombre ?? ""),
+        fechaDate: fecha,
+        Unidades_Vendidas: Number(row.Unidades_Vendidas) || 0,
+        Semanas_Cobertura_Stock: Number(row.Semanas_Cobertura_Stock) || 0,
+        Stock_Actual: Number(row.Stock_Actual) || 0,
+        isoWeek: 0,
+        isoYear: 0,
+      }
+      const { isoWeek, isoYear } = getISOWeekAndYear(fecha)
+      transaction.isoWeek = isoWeek
+      transaction.isoYear = isoYear
+      transactions.push(transaction)
+    })
 
-    let configRules = new Map<string, ConfigRule>()
-    let configWarnings: string[] = []
+    if (transactions.length === 0) {
+      return { results: [], weekHeaders: [], error: "No se encontraron transacciones válidas en el archivo de ventas." }
+    }
 
+    const { data: aggregatedData, weekHeaders } = aggregateTransactionsToProducts(
+      transactions,
+      numPeriods,
+      divisorPeriodos,
+    )
+
+    let rules = new Map<string, Rule>()
     if (configFile) {
-      const configData = await readFileData(configFile)
-      if (configData.length >= 2) {
-        const {
-          headerMap: configHeaderMap,
-          optionalHeaderMap: configOptionalMap,
-          error: configHeaderError,
-        } = validateAndMapHeaders(configData[0], CONFIG_REQUIRED_HEADERS)
-        if (configHeaderError) {
-          return { results: [], weekHeaders: [], error: `Error en archivo de reglas: ${configHeaderError}` }
-        } else {
-          const { rules, warnings } = parseConfigRules(configData, configHeaderMap, configOptionalMap!)
-          configRules = rules
-          configWarnings = warnings
-        }
+      const configData = await readFile(configFile)
+      headerError = validateHeaders(configData, CONFIG_REQUIRED_HEADERS)
+      if (headerError) {
+        warnings.push(`Archivo de reglas: ${headerError}. Se procesará sin reglas.`)
       } else {
-        configWarnings.push("El archivo de reglas está vacío o solo contiene encabezados.")
+        configData.forEach((row: ConfigRule) => {
+          const id = normalizeId(row.ID)
+          if (id) {
+            rules.set(id, {
+              Stock_Fijo: row.Stock_Fijo,
+              Semanas_Cobertura_Stock: row.Semanas_Cobertura_Stock,
+            })
+          }
+        })
       }
     }
 
-    const {
-      data: aggregatedData,
-      weekHeaders,
-      error: aggregationError,
-    } = aggregateTransactionsToProducts(transactions, numPeriods, divisorPeriodos)
-    if (aggregationError) return { results: [], weekHeaders: [], error: aggregationError }
+    const results = calculateProductMetrics(aggregatedData, rules)
 
-
-    const dataWithRules = applyConfigRules(aggregatedData, configRules)
-
-    const finalResults = calculateReplenishment(dataWithRules)
-
-    return {
-      results: finalResults,
-      weekHeaders: weekHeaders,
-      warnings: configWarnings,
-      processingInfo: {
-        totalTransactions: transactions.length,
-        uniqueProducts: finalResults.length,
-      },
+    const dateRange = {
+      start: new Date(Math.min(...transactions.map((t) => t.fechaDate.getTime()))).toLocaleDateString("es-ES"),
+      end: new Date(Math.max(...transactions.map((t) => t.fechaDate.getTime()))).toLocaleDateString("es-ES"),
     }
+
+    const processingInfo: ProcessingInfo = {
+      totalRows: salesData.length,
+      productsWithSales: results.length,
+      productsWithoutSales: 0, // Lógica a implementar si es necesario
+      productsWithConfig: rules.size,
+      dateRange,
+    }
+
+    return { results, weekHeaders, warnings, processingInfo }
   } catch (e) {
-    const error = e instanceof Error ? e.message : "Ocurrió un error desconocido."
-    return { results: [], weekHeaders: [], error: `Error Crítico: ${error}` }
+    const errorMsg = e instanceof Error ? e.message : "Ocurrió un error desconocido."
+    return { results: [], weekHeaders: [], error: errorMsg }
   }
 }
 
+// --- Función de Exportación ---
+
 export const exportResultsToExcel = (
   results: ProductCalculatedData[],
-  weekHeaders: string[] = [],
+  weekHeaders: string[],
   fileName: string,
   weeksToAnalyze: number,
-  divisor: number,
-  processingInfo: { totalTransactions: number; uniqueProducts: number },
-): void => {
-  if (!results || results.length === 0) return
+  periodsDivisor: number,
+  processingInfo: ProcessingInfo,
+) => {
+  const wb = XLSX.utils.book_new()
 
-  const numPeriodsToExport = weekHeaders.length > 0 ? weekHeaders.length : results[0]?.salesPeriods?.length || 0
-  const baseWeekHeaders =
-    weekHeaders.length > 0
-      ? weekHeaders
-      : Array.from({ length: numPeriodsToExport }, (_, i) => `Vta Semana ${numPeriodsToExport - i}`)
-  const reversedWeekHeaders = [...baseWeekHeaders].reverse()
-  const tableHeaders = [
-    "ID",
-    "Nombre",
-    "Venta Mes Actual",
-    ...reversedWeekHeaders,
-    "Venta Prom. Semanal",
-    "Semanas Cobertura",
-    "Stock Actual",
-    "Stock Ideal",
-    "Unidades a Abastecer",
-    "Estado",
-    "Error",
+  // Hoja de Resumen
+  const summaryData = [
+    ["Parámetro", "Valor"],
+    ["Archivo de Ventas", fileName],
+    ["Semanas a Analizar", weeksToAnalyze],
+    ["Divisor de Períodos", periodsDivisor],
+    ["Rango de Fechas", `${processingInfo.dateRange.start} - ${processingInfo.dateRange.end}`],
+    ["Total de Productos Analizados", processingInfo.productsWithSales],
+    ["Productos con Reglas Aplicadas", processingInfo.productsWithConfig],
   ]
+  const summaryWs = XLSX.utils.aoa_to_sheet(summaryData)
+  XLSX.utils.book_append_sheet(wb, summaryWs, "Resumen")
 
-  const tableDataRows = results.map((product) => {
-    const weeklySales = product.salesPeriods.slice(0, numPeriodsToExport).map((s) => s || 0)
-    const reversedWeeklySales = [...weeklySales].reverse()
-
-    return [
-      product.ID,
-      product.Nombre,
-      product.Venta_Total_Mes_Actual,
-      ...reversedWeeklySales,
-      product.Venta_Promedio_Semanal,
-      product.Semanas_Cobertura_Stock,
-      product.Stock_Actual,
-      product.Stock_Ideal,
-      product.Unidades_A_Abastecer,
-      product.status,
-      product.error ? product.error.replace(`Error para ID ${product.ID || "Unknown"}: `, "") : "",
-    ]
-  })
-
-  const summaryRow1 = ["Resultados del Cálculo de Abastecimiento"]
-  const summaryRow2 = [
-    `Mostrando resultados para el archivo: ${fileName} (Análisis de ${weeksToAnalyze} semanas, Divisor: ${divisor})`,
-  ]
-  const summaryRow3 = [
-    `Procesamiento: ${processingInfo.totalTransactions} transacciones procesadas, ${processingInfo.uniqueProducts} productos únicos`,
-  ]
-  const blankRow = [""]
-  const dataToExport = [summaryRow1, summaryRow2, summaryRow3, blankRow, tableHeaders, ...tableDataRows]
-
-  const worksheet = XLSX.utils.aoa_to_sheet(dataToExport)
-
-  const columnWidths = tableHeaders.map((header, colIndex) => {
-    if (header === "Nombre") return { wch: 45 }
-    if (header === "ID") return { wch: 12 }
-    if (header === "Error") return { wch: 40 }
-
-    const allRowsForCol = dataToExport.map((row) => row[colIndex])
-    const maxWidth = Math.max(...allRowsForCol.map((cell) => String(cell ?? "").length))
-    return { wch: Math.min(50, maxWidth + 4) }
-  })
-  worksheet["!cols"] = columnWidths
-
-  const numColumns = tableHeaders.length
-  if (!worksheet["!merges"]) worksheet["!merges"] = []
-  worksheet["!merges"].push({ s: { r: 0, c: 0 }, e: { r: 0, c: numColumns - 1 } })
-  worksheet["!merges"].push({ s: { r: 1, c: 0 }, e: { r: 1, c: numColumns - 1 } })
-  worksheet["!merges"].push({ s: { r: 2, c: 0 }, e: { r: 2, c: numColumns - 1 } })
-
-  const titleStyle = { font: { bold: true, sz: 14 }, alignment: { horizontal: "left", vertical: "center" } }
-  const summaryStyle = { font: { sz: 11 }, alignment: { horizontal: "left", vertical: "center" } }
-  const headerStyle = {
-    font: { bold: true, color: { rgb: "FFFFFF" } },
-    fill: { fgColor: { rgb: "2563EB" } }, // blue-600
-    alignment: { horizontal: "center", vertical: "center", wrapText: true },
-  }
-
-  const getAlignment = (header: string): { horizontal: "left" | "right" | "center" } => {
-    const numericHeaders = new Set([
-      "Venta Mes Actual",
-      ...baseWeekHeaders,
-      "Venta Prom. Semanal",
-      "Semanas Cobertura",
-      "Stock Actual",
-      "Stock Ideal",
-      "Unidades a Abastecer",
-    ])
-    if (header === "Estado") return { horizontal: "center" }
-    if (numericHeaders.has(header)) return { horizontal: "right" }
-    return { horizontal: "left" }
-  }
-
-  worksheet[XLSX.utils.encode_cell({ r: 0, c: 0 })].s = titleStyle
-  worksheet[XLSX.utils.encode_cell({ r: 1, c: 0 })].s = summaryStyle
-  worksheet[XLSX.utils.encode_cell({ r: 2, c: 0 })].s = summaryStyle
-
-  for (let C = 0; C < numColumns; C++) {
-    const cellRef = XLSX.utils.encode_cell({ r: 4, c: C })
-    if (worksheet[cellRef]) worksheet[cellRef].s = headerStyle
-  }
-
-  for (let R = 5; R < dataToExport.length; R++) {
-    const productHasError = results[R - 5]?.error
-    for (let C = 0; C < numColumns; C++) {
-      const cellRef = XLSX.utils.encode_cell({ r: R, c: C })
-      if (worksheet[cellRef]) {
-        const header = tableHeaders[C]
-        worksheet[cellRef].s = {
-          alignment: { ...getAlignment(header), vertical: "center" },
-          fill: productHasError ? { fgColor: { rgb: "FFEBEE" } } : undefined,
-          font: header === "Unidades a Abastecer" ? { bold: true } : undefined,
-        }
-      }
+  // Hoja de Resultados
+  const dataToExport = results.map((r) => {
+    const sales: { [key: string]: number } = {}
+    weekHeaders.forEach((h, i) => {
+      sales[h] = r.salesPeriods[i]
+    })
+    return {
+      ID: r.ID,
+      Nombre: r.Nombre,
+      ...sales,
+      "Venta Prom. Semanal": r.Venta_Promedio_Semanal,
+      "Semanas Cobertura": r.Semanas_Cobertura_Stock,
+      "Stock Actual": r.Stock_Actual,
+      "Stock Ideal": r.Stock_Ideal,
+      "Unidades a Abastecer": r.Unidades_A_Abastecer,
+      Estado: r.status,
     }
-  }
+  })
 
-  const workbook = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Reporte de Abastecimiento")
-  XLSX.writeFile(workbook, "Smart_Supply_Abastecimiento_Report.xlsx")
+  const resultsWs = XLSX.utils.json_to_sheet(dataToExport)
+  XLSX.utils.book_append_sheet(wb, resultsWs, "Resultados")
+
+  XLSX.writeFile(wb, `SmartSupply_Resultados_${new Date().toISOString().slice(0, 10)}.xlsx`)
 }
